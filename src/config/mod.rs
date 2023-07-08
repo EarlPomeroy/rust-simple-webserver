@@ -22,6 +22,11 @@ fn get_home_dir() -> String {
 
 impl Config {
     pub fn get_base(&self) -> String {
+        if self.base.ends_with("/") {
+            let mut s = self.base.clone();
+            s.truncate(1);
+            return s;
+        }
         self.base.clone()
     }
 
