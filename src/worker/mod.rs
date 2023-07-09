@@ -1,4 +1,4 @@
-use std::fs;
+use std::fs::File;
 use std::io::{prelude::*, BufReader};
 use std::net::TcpStream;
 use std::path::Path;
@@ -15,6 +15,21 @@ enum Method {
     GET,
     POST,
     UNSUPPORTED,
+}
+
+struct Response {
+    header: String,
+    body: Option<Vec<u8>>,
+}
+
+impl Response {
+    fn new(header: String) -> Self {
+        Self { header, body: None }
+    }
+
+    fn add_body(&mut self, body: Vec<u8>) {
+        self.body = Some(body);
+    }
 }
 
 impl Worker {
@@ -59,37 +74,60 @@ impl Worker {
             Method::UNSUPPORTED => self.process_unsupported(Method::UNSUPPORTED),
         };
 
-        self.stream.write_all(response.as_bytes()).unwrap();
+        self.stream.write_all(response.header.as_bytes()).unwrap();
+        match response.body {
+            Some(body) => self.stream.write_all(&body).unwrap(),
+            None => (),
+        }
     }
 
-    fn process_get(&self, request_file: &str) -> String {
+    fn process_get(&self, request_file: &str) -> Response {
         let path = Path::new(self.base_path.as_str());
 
-        let file = if request_file == "/" {
+        let filename = if request_file == "/" {
             "index.html"
         } else {
             request_file
         };
 
-        let full_path = path.join(file);
+        let full_path = path.join(filename);
 
         if path.exists() {
             println!("\tGetting {}", full_path.display());
 
             let status_line = "HTTP/1.1 200 OK";
 
-            if let Ok(contents) = fs::read_to_string(&full_path) {
-                let length = contents.len();
-                let response =
-                    format!("{status_line}\r\nContent-Length: {length}\r\n\r\n{contents}");
+            let mut file = match File::open(full_path.clone()) {
+                Ok(file) => file,
+                Err(_) => {
+                    return self.process_404(full_path.display().to_string());
+                }
+            };
 
-                return response;
+            let mut buffer = Vec::new();
+            match file.read_to_end(&mut buffer) {
+                Ok(bytes_read) => {
+                    let length = bytes_read;
+                    let mime_type = match mime_guess::from_path(filename).first() {
+                        Some(mime) => mime,
+                        None => mime::TEXT_PLAIN,
+                    };
+                    let header =
+                        format!("{status_line}\r\nContent-Length: {length}\r\nContent-Type: {mime_type}\r\n\r\n");
+                    let mut response = Response::new(header);
+                    response.add_body(buffer);
+
+                    return response;
+                }
+                Err(_) => {
+                    return self.process_404(full_path.display().to_string());
+                }
             }
         }
         self.process_404(full_path.display().to_string())
     }
 
-    fn process_404(&self, full_path: String) -> String {
+    fn process_404(&self, full_path: String) -> Response {
         let status_line = "HTTP/1.1 404 NOT FOUND";
 
         println!("\tFile not found: {}", full_path);
@@ -110,19 +148,19 @@ impl Worker {
 
         let length: usize = not_found_html.iter().map(|s| s.len()).sum();
 
-        let response = format!(
+        let header = format!(
             "{status_line}\r\nContent-Length: {length}\r\n\r\n{}",
             not_found_html.join("")
         );
 
-        response
+        Response::new(header)
     }
 
-    fn process_post(&self) -> String {
+    fn process_post(&self) -> Response {
         self.process_unsupported(Method::POST)
     }
 
-    fn process_unsupported(&self, method: Method) -> String {
+    fn process_unsupported(&self, method: Method) -> Response {
         let status_line = "HTTP/1.1 501 NOT IMPLEMENTED";
 
         let method_str = format!("\t<h1>Method: {:?}</h1>\n", method);
@@ -144,11 +182,11 @@ impl Worker {
 
         let length: usize = not_implemented_html.iter().map(|s| s.len()).sum();
 
-        let response = format!(
+        let header = format!(
             "{status_line}\r\nContent-Length: {length}\r\n\r\n{}",
             not_implemented_html.join("")
         );
 
-        response
+        Response::new(header)
     }
 }
